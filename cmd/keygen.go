@@ -58,14 +58,23 @@ func RunKeygen(args []string) error {
 // RunKeygenLocal generates all shares on one machine (ceremony mode).
 func RunKeygenLocal(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	shares := fs.Int("shares", 2, "number of key shares (n-of-n)")
+	numParties := fs.Int("parties", 2, "number of parties (n)")
+	threshold := fs.Int("threshold", 0, "signing threshold (t); default = n, i.e. all parties required")
 	outDir := fs.String("out-dir", ".", "output directory for shares and public key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	if *shares < 2 {
-		return fmt.Errorf("need at least 2 shares")
+	n := *numParties
+	t := *threshold
+	if t == 0 {
+		t = n // default: n-of-n
+	}
+	if n < 2 {
+		return fmt.Errorf("need at least 2 parties")
+	}
+	if t < 2 || t > n {
+		return fmt.Errorf("threshold must be 2 <= t <= n (got t=%d, n=%d)", t, n)
 	}
 
 	fmt.Println("Generating RSA-3072 key with e=3...")
@@ -85,21 +94,22 @@ func RunKeygenLocal(args []string) error {
 	}
 	fmt.Printf("Public key saved to %s\n", pubKeyPath)
 
-	fmt.Printf("Splitting key into %d shares...\n", *shares)
-	keyShares, err := mpc.SplitKey(key.D, key.Lambda, key.N, key.E, *shares)
+	fmt.Printf("Splitting key into %d-of-%d threshold shares...\n", t, n)
+	keyShares, err := mpc.SplitKeyThreshold(key.D, key.Lambda, key.N, key.E, n, t)
 	if err != nil {
 		return fmt.Errorf("splitting key: %w", err)
 	}
 
 	for i, share := range keyShares {
 		sharePath := filepath.Join(*outDir, fmt.Sprintf("share_%d.json", i+1))
-		if err := mpc.SaveShare(share, sharePath); err != nil {
+		if err := mpc.SaveThresholdShare(share, sharePath); err != nil {
 			return fmt.Errorf("saving share %d: %w", i+1, err)
 		}
-		fmt.Printf("Share %d saved to %s\n", i+1, sharePath)
+		subShareCount := len(share.Shares)
+		fmt.Printf("Share %d saved to %s (%d sub-shares)\n", i+1, sharePath, subShareCount)
 	}
 
-	fmt.Println("Done. Keep shares secure and distribute to separate parties.")
+	fmt.Printf("Done. %d-of-%d threshold scheme. Any %d parties can sign.\n", t, n, t)
 	return nil
 }
 
@@ -174,6 +184,7 @@ func RunKeygenFinalize(args []string) error {
 	fs := flag.NewFlagSet("keygen finalize", flag.ExitOnError)
 	partyIndex := fs.Int("party", 0, "coordinator's party index (1-based)")
 	contribList := fs.String("contributions", "", "comma-separated contribution message files")
+	threshold := fs.Int("threshold", 0, "signing threshold (t); default = n, i.e. all parties required")
 	outDir := fs.String("out-dir", ".", "output directory")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -231,6 +242,14 @@ func RunKeygenFinalize(args []string) error {
 		}
 	}
 
+	t := *threshold
+	if t == 0 {
+		t = numParties
+	}
+	if t < 2 || t > numParties {
+		return fmt.Errorf("threshold must be 2 <= t <= n (got t=%d, n=%d)", t, numParties)
+	}
+
 	fmt.Fprintf(os.Stderr, "Generating RSA-3072 key with e=3...\n")
 	key, err := rsa3.GenerateKey()
 	if err != nil {
@@ -238,25 +257,12 @@ func RunKeygenFinalize(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "Key generated: %d-bit modulus\n", key.N.BitLen())
 
-	// Compute shares:
-	// For each non-coordinator party i: share_i = contribution_i mod lambda
-	// For coordinator: share_coord = (d - sum(share_i for i != coord)) mod lambda
-	shares := make(map[int]*big.Int)
-	sumOthers := new(big.Int)
-
-	for i := 1; i <= numParties; i++ {
-		if i == *partyIndex {
-			continue
-		}
-		share := new(big.Int).Mod(contributions[i], key.Lambda)
-		shares[i] = share
-		sumOthers.Add(sumOthers, share)
+	// Generate threshold shares
+	fmt.Fprintf(os.Stderr, "Splitting into %d-of-%d threshold shares...\n", t, numParties)
+	thresholdShares, err := mpc.SplitKeyThreshold(key.D, key.Lambda, key.N, key.E, numParties, t)
+	if err != nil {
+		return fmt.Errorf("splitting key: %w", err)
 	}
-
-	// Coordinator's share
-	coordShare := new(big.Int).Sub(key.D, sumOthers)
-	coordShare.Mod(coordShare, key.Lambda)
-	shares[*partyIndex] = coordShare
 
 	// Save public key
 	if err := os.MkdirAll(*outDir, 0755); err != nil {
@@ -269,19 +275,12 @@ func RunKeygenFinalize(args []string) error {
 	fmt.Fprintf(os.Stderr, "Public key saved to %s\n", pubKeyPath)
 
 	// Save coordinator's own share
-	coordShareFile := &mpc.KeyShare{
-		Version:        1,
-		PartyIndex:     *partyIndex,
-		NumParties:     numParties,
-		Modulus:        base64.StdEncoding.EncodeToString(key.N.Bytes()),
-		PublicExponent: key.E,
-		Share:          base64.StdEncoding.EncodeToString(coordShare.Bytes()),
-	}
+	coordShare := thresholdShares[*partyIndex-1]
 	coordPath := filepath.Join(*outDir, fmt.Sprintf("share_%d.json", *partyIndex))
-	if err := mpc.SaveShare(coordShareFile, coordPath); err != nil {
+	if err := mpc.SaveThresholdShare(coordShare, coordPath); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Coordinator share saved to %s\n", coordPath)
+	fmt.Fprintf(os.Stderr, "Coordinator share saved to %s (%d sub-shares)\n", coordPath, len(coordShare.Shares))
 
 	// Generate public key PEM for embedding in messages
 	pubPEM := encodePubKeyPEM(key)
@@ -292,17 +291,19 @@ func RunKeygenFinalize(args []string) error {
 			continue
 		}
 
+		shareData, _ := json.Marshal(thresholdShares[i-1])
+
 		payload := &SharePayload{
 			Modulus:        base64.StdEncoding.EncodeToString(key.N.Bytes()),
 			PublicExponent: key.E,
-			ShareValue:     base64.StdEncoding.EncodeToString(shares[i].Bytes()),
+			ShareValue:     base64.StdEncoding.EncodeToString(shareData),
 			PublicKeyPEM:   pubPEM,
 		}
 		payloadJSON, _ := json.Marshal(payload)
 
 		msg := &KeygenMessage{
 			Type:       "share",
-			Version:    1,
+			Version:    2,
 			PartyIndex: i,
 			NumParties: numParties,
 			Data:       base64.StdEncoding.EncodeToString(payloadJSON),
@@ -323,8 +324,9 @@ func RunKeygenFinalize(args []string) error {
 	key.Q.SetInt64(0)
 	key.Lambda.SetInt64(0)
 
-	fmt.Fprintf(os.Stderr, "\nDone. Send each msg_to_party_N.txt to the respective party.\n")
-	fmt.Fprintf(os.Stderr, "They should run: mpcegosign keygen accept --msg <message_file> --out share.json\n")
+	fmt.Fprintf(os.Stderr, "\nDone. %d-of-%d threshold scheme.\n", t, numParties)
+	fmt.Fprintf(os.Stderr, "Send each msg_to_party_N.txt to the respective party.\n")
+	fmt.Fprintf(os.Stderr, "They should run: mpcegosign keygen accept --msg <message_file>\n")
 	return nil
 }
 
@@ -369,16 +371,6 @@ func RunKeygenAccept(args []string) error {
 		return fmt.Errorf("parsing share payload: %w", err)
 	}
 
-	// Save share
-	share := &mpc.KeyShare{
-		Version:        1,
-		PartyIndex:     msg.PartyIndex,
-		NumParties:     msg.NumParties,
-		Modulus:        payload.Modulus,
-		PublicExponent: payload.PublicExponent,
-		Share:          payload.ShareValue,
-	}
-
 	if err := os.MkdirAll(*outDir, 0755); err != nil {
 		return err
 	}
@@ -387,10 +379,37 @@ func RunKeygenAccept(args []string) error {
 	if sharePath == "" {
 		sharePath = filepath.Join(*outDir, fmt.Sprintf("share_%d.json", msg.PartyIndex))
 	}
-	if err := mpc.SaveShare(share, sharePath); err != nil {
-		return err
+
+	if msg.Version >= 2 {
+		// v2: ShareValue contains the full ThresholdKeyShare JSON
+		shareJSON, err := base64.StdEncoding.DecodeString(payload.ShareValue)
+		if err != nil {
+			return fmt.Errorf("decoding share data: %w", err)
+		}
+		var share mpc.ThresholdKeyShare
+		if err := json.Unmarshal(shareJSON, &share); err != nil {
+			return fmt.Errorf("parsing threshold share: %w", err)
+		}
+		if err := mpc.SaveThresholdShare(&share, sharePath); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Share saved to %s (party %d of %d, %d-of-%d threshold, %d sub-shares)\n",
+			sharePath, share.PartyIndex, share.NumParties, share.Threshold, share.NumParties, len(share.Shares))
+	} else {
+		// v1: simple n-of-n share
+		share := &mpc.KeyShare{
+			Version:        1,
+			PartyIndex:     msg.PartyIndex,
+			NumParties:     msg.NumParties,
+			Modulus:        payload.Modulus,
+			PublicExponent: payload.PublicExponent,
+			Share:          payload.ShareValue,
+		}
+		if err := mpc.SaveShare(share, sharePath); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Share saved to %s (party %d of %d)\n", sharePath, msg.PartyIndex, msg.NumParties)
 	}
-	fmt.Fprintf(os.Stderr, "Share saved to %s (party %d of %d)\n", sharePath, msg.PartyIndex, msg.NumParties)
 
 	// Save public key
 	pubKeyPath := filepath.Join(*outDir, "public.pem")

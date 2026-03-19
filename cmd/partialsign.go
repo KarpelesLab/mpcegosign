@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/magicaltux/mpcegosign/pkg/mpc"
 )
@@ -15,6 +16,7 @@ func RunPartialSign(args []string) error {
 	sharePath := fs.String("share", "", "path to key share JSON")
 	hashPath := fs.String("hash", "", "path to hash file")
 	outPath := fs.String("out", "partial.sig", "output partial signature file")
+	subsetStr := fs.String("subset", "", "subset to sign for (e.g. '1,2,4'); auto-detected if omitted")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -23,8 +25,8 @@ func RunPartialSign(args []string) error {
 		return fmt.Errorf("--share and --hash are required")
 	}
 
-	// Load share
-	share, err := mpc.LoadShare(*sharePath)
+	// Load share (supports both v1 and v2)
+	share, err := mpc.LoadThresholdShare(*sharePath)
 	if err != nil {
 		return fmt.Errorf("loading share: %w", err)
 	}
@@ -45,24 +47,48 @@ func RunPartialSign(args []string) error {
 		return fmt.Errorf("decoding padded digest: %w", err)
 	}
 
-	// Get share and modulus values
-	shareVal, err := share.ShareValue()
-	if err != nil {
-		return fmt.Errorf("decoding share value: %w", err)
-	}
 	modulus, err := share.ModulusValue()
 	if err != nil {
 		return fmt.Errorf("decoding modulus: %w", err)
 	}
 
-	// Compute partial signature
-	partial := mpc.ComputePartial(padded, shareVal, modulus, share.PartyIndex)
+	// Determine which subset to use
+	var subsetKey string
+	if *subsetStr != "" {
+		// Parse explicit subset
+		parts := strings.Split(*subsetStr, ",")
+		indices := make([]int, len(parts))
+		for i, p := range parts {
+			fmt.Sscanf(strings.TrimSpace(p), "%d", &indices[i])
+		}
+		subsetKey = mpc.SubsetKey(indices)
+	} else if len(share.Shares) == 1 {
+		// Only one subset (n-of-n), use it
+		for k := range share.Shares {
+			subsetKey = k
+		}
+	} else {
+		// List available subsets and ask user to specify
+		fmt.Fprintf(os.Stderr, "This share has %d sub-shares for different subsets.\n", len(share.Shares))
+		fmt.Fprintf(os.Stderr, "Available subsets:\n")
+		for k := range share.Shares {
+			fmt.Fprintf(os.Stderr, "  %s\n", k)
+		}
+		return fmt.Errorf("--subset is required for threshold shares (e.g. --subset 1,2,4)")
+	}
 
-	// Save
+	shareVal, err := share.GetShareValue(subsetKey)
+	if err != nil {
+		return fmt.Errorf("getting share for subset %s: %w", subsetKey, err)
+	}
+
+	// Compute partial signature
+	partial := mpc.ComputePartialForSubset(padded, shareVal, modulus, share.PartyIndex, subsetKey)
+
 	if err := mpc.SavePartial(partial, *outPath); err != nil {
 		return fmt.Errorf("saving partial signature: %w", err)
 	}
 
-	fmt.Printf("Partial signature (party %d) written to %s\n", share.PartyIndex, *outPath)
+	fmt.Printf("Partial signature (party %d, subset {%s}) written to %s\n", share.PartyIndex, subsetKey, *outPath)
 	return nil
 }

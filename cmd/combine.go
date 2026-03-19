@@ -69,6 +69,17 @@ func RunCombine(args []string) error {
 		partials[i] = ps
 	}
 
+	// Verify all partials are for the same subset (if threshold)
+	if partials[0].SubsetKey != "" {
+		for i := 1; i < len(partials); i++ {
+			if partials[i].SubsetKey != partials[0].SubsetKey {
+				return fmt.Errorf("partial signatures are for different subsets: %s vs %s",
+					partials[0].SubsetKey, partials[i].SubsetKey)
+			}
+		}
+		fmt.Printf("Combining partials for subset {%s}\n", partials[0].SubsetKey)
+	}
+
 	// Get modulus from sigstruct (stored little-endian)
 	modLE := ss.Modulus()
 	modBE := rsa3.LittleEndianToBigEndian(modLE)

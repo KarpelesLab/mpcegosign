@@ -12,7 +12,8 @@ import (
 type PartialSignature struct {
 	Version          int    `json:"version"`
 	PartyIndex       int    `json:"party_index"`
-	PartialSignature string `json:"partial_signature"` // base64 big-endian
+	SubsetKey        string `json:"subset_key,omitempty"` // which subset this partial is for
+	PartialSignature string `json:"partial_signature"`    // base64 big-endian
 }
 
 // ComputePartial computes s_i = padded_msg^{d_i} mod N.
@@ -23,6 +24,19 @@ func ComputePartial(paddedMsg []byte, shareValue, modulus *big.Int, partyIndex i
 	return &PartialSignature{
 		Version:          1,
 		PartyIndex:       partyIndex,
+		PartialSignature: base64.StdEncoding.EncodeToString(si.Bytes()),
+	}
+}
+
+// ComputePartialForSubset computes a partial signature for a specific subset.
+func ComputePartialForSubset(paddedMsg []byte, shareValue, modulus *big.Int, partyIndex int, subsetKey string) *PartialSignature {
+	m := new(big.Int).SetBytes(paddedMsg)
+	si := new(big.Int).Exp(m, shareValue, modulus)
+
+	return &PartialSignature{
+		Version:          1,
+		PartyIndex:       partyIndex,
+		SubsetKey:        subsetKey,
 		PartialSignature: base64.StdEncoding.EncodeToString(si.Bytes()),
 	}
 }

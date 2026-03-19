@@ -52,14 +52,28 @@ func RunSign(args []string) error {
 		}
 	}
 
-	// Load all shares
-	shares := make([]*mpc.KeyShare, len(sharePaths))
+	// Load all shares (supports v1 and v2/threshold)
+	shares := make([]*mpc.ThresholdKeyShare, len(sharePaths))
 	for i, p := range sharePaths {
-		s, err := mpc.LoadShare(strings.TrimSpace(p))
+		s, err := mpc.LoadThresholdShare(strings.TrimSpace(p))
 		if err != nil {
 			return fmt.Errorf("loading share %s: %w", p, err)
 		}
 		shares[i] = s
+	}
+
+	// Find the subset that all provided parties belong to
+	partyIndices := make([]int, len(shares))
+	for i, s := range shares {
+		partyIndices[i] = s.PartyIndex
+	}
+	subsetKey := mpc.SubsetKey(partyIndices)
+
+	// Verify all shares have this subset
+	for _, s := range shares {
+		if _, err := s.GetShareValue(subsetKey); err != nil {
+			return fmt.Errorf("party %d doesn't have share for subset {%s}: %w", s.PartyIndex, subsetKey, err)
+		}
 	}
 
 	// Get modulus from first share
@@ -120,14 +134,14 @@ func RunSign(args []string) error {
 	sigHash := ss.HashForSigning()
 	padded := rsa3.PadPKCS1v15SHA256(sigHash)
 
-	// Compute partial signatures
+	// Compute partial signatures using the matching subset
 	partials := make([]*mpc.PartialSignature, len(shares))
 	for i, share := range shares {
-		sv, err := share.ShareValue()
+		sv, err := share.GetShareValue(subsetKey)
 		if err != nil {
-			return fmt.Errorf("decoding share %d: %w", i+1, err)
+			return fmt.Errorf("getting share for party %d: %w", share.PartyIndex, err)
 		}
-		partials[i] = mpc.ComputePartial(padded, sv, modulus, share.PartyIndex)
+		partials[i] = mpc.ComputePartialForSubset(padded, sv, modulus, share.PartyIndex, subsetKey)
 	}
 
 	// Combine
