@@ -48,12 +48,16 @@ func usage() {
 Usage: mpcegosign <command> [options]
 
 Commands:
-  keygen        Generate RSA-3072/e=3 key and split into shares
-  sign          Sign EGo enclave with all shares locally
-  hash          Compute MRENCLAVE and output digest for distributed signing
-  partial-sign  Compute partial signature with one share
-  combine       Combine partial signatures into signed enclave
-  signerid      Compute MRSIGNER from key or binary
+  keygen              Generate key locally and split into shares (ceremony mode)
+  keygen contribute   Generate contribution for distributed keygen
+  keygen finalize     Coordinator: generate key using contributions, output share messages
+  keygen accept       Import share from coordinator's message
+
+  sign                Sign EGo enclave with all shares locally
+  hash                Compute MRENCLAVE and output digest for distributed signing
+  partial-sign        Compute partial signature with one share
+  combine             Combine partial signatures into signed enclave
+  signerid            Compute MRSIGNER from key or binary
 
 Environment:
   EGO_PATH      Path to EGo installation (default: /opt/ego)
