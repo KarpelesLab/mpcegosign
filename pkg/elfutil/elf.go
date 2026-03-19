@@ -111,6 +111,56 @@ func WriteSigStructToFile(path string, oeinfo *OEInfo, sigstruct []byte) error {
 	return err
 }
 
+// ReadELFInfoForMeasurement reads ELF info and zeros the SIGSTRUCT in the
+// in-memory image data (as oesign does before measuring).
+func ReadELFInfoForMeasurement(path string) (*ELFInfo, error) {
+	info, err := ReadELFInfo(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Zero the SIGSTRUCT within segment data covering .oeinfo
+	// OE zeroes the sigstruct in-place before measuring
+	f, err := elf.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	sec := f.Section(OEInfoSectionName)
+	if sec != nil {
+		oeInfoVAddr := sec.Addr
+		sigstructVAddr := oeInfoVAddr + SigStructOffset
+		sigstructEnd := sigstructVAddr + SigStructSize
+
+		for i := range info.Segments {
+			seg := &info.Segments[i]
+			segStart := seg.VAddr
+			segFileEnd := seg.VAddr + seg.FileSize
+
+			// Check overlap with sigstruct region
+			overlapStart := sigstructVAddr
+			if overlapStart < segStart {
+				overlapStart = segStart
+			}
+			overlapEnd := sigstructEnd
+			if overlapEnd > segFileEnd {
+				overlapEnd = segFileEnd
+			}
+
+			if overlapStart < overlapEnd {
+				zeroStart := overlapStart - seg.VAddr
+				zeroEnd := overlapEnd - seg.VAddr
+				for j := zeroStart; j < zeroEnd; j++ {
+					seg.Data[j] = 0
+				}
+			}
+		}
+	}
+
+	return info, nil
+}
+
 // ReadELFInfo reads all information needed for measurement from an ELF binary.
 func ReadELFInfo(path string) (*ELFInfo, error) {
 	f, err := elf.Open(path)
@@ -260,6 +310,58 @@ func readDataAtVAddr(f *elf.File, vaddr, size uint64) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("virtual address %#x not found in any PT_LOAD segment", vaddr)
+}
+
+// MergeELFInfoForEGo creates a combined ELFInfo for EGo's dual-image layout.
+// mainImage is the ego-enclave runtime, payloadImage is the user's Go binary.
+// The layout follows OE's _add_pages: main segments, then payload segments
+// (offset by main image size), then merged relocations.
+func MergeELFInfoForEGo(mainImage, payloadImage *ELFInfo) *ELFInfo {
+	merged := &ELFInfo{
+		EntryRVA: mainImage.EntryRVA,
+	}
+
+	// Main image segments go first (at their own vaddrs)
+	merged.Segments = append(merged.Segments, mainImage.Segments...)
+
+	// Payload segments are offset by main image size
+	for _, seg := range payloadImage.Segments {
+		shifted := SegmentInfo{
+			VAddr:    seg.VAddr + mainImage.ImageSize,
+			MemSize:  seg.MemSize,
+			FileSize: seg.FileSize,
+			Flags:    seg.Flags,
+			Data:     seg.Data,
+		}
+		merged.Segments = append(merged.Segments, shifted)
+	}
+
+	// Total image size = main + payload
+	merged.ImageSize = mainImage.ImageSize + payloadImage.ImageSize
+
+	// TLS: OE computes TLS from the main image only (the submodule's TLS
+	// is typically zero for EGo payloads)
+	merged.TLSPageCount = mainImage.TLSPageCount
+	if payloadImage.TLSPageCount > merged.TLSPageCount {
+		merged.TLSPageCount = payloadImage.TLSPageCount
+	}
+
+	// Relocations: OE merges relocation data from both images.
+	// The main image's _link_elf_image resolves cross-module relocations and
+	// stores the combined reloc data. For measurement purposes, we concatenate
+	// and page-align.
+	totalRelocSize := roundUpToPage64(mainImage.RelocSize + payloadImage.RelocSize)
+	mergedReloc := make([]byte, totalRelocSize)
+	copy(mergedReloc, mainImage.RelocData)
+	copy(mergedReloc[mainImage.RelocSize:], payloadImage.RelocData)
+	merged.RelocData = mergedReloc
+	merged.RelocSize = mainImage.RelocSize + payloadImage.RelocSize
+
+	// Payload data comes from the payload image's .oeinfo
+	merged.PayloadData = payloadImage.PayloadData
+	merged.PayloadDataSize = payloadImage.PayloadDataSize
+
+	return merged
 }
 
 func roundUpToPage64(n uint64) uint64 {

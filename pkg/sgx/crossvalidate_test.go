@@ -12,10 +12,10 @@ import (
 
 const testBinary = "/home/magicaltux/projects/vpnet/vpnetd-sgx/vpnetd-sgx"
 
-// Reference values extracted from the signed vpnetd-sgx binary
+// Reference values extracted from the signed vpnetd-sgx binary.
+// MRSIGNER is stable (same key), MRENCLAVE depends on binary content.
 const (
-	refMRSIGNER  = "ab81fd99df38cd8d77fd4bd1fa22a76f7738d5182d5c8cde3d9a7aeaffbeb6be"
-	refMRENCLAVE = "2472234e34f6be0c82f0ba851b18ced901e85e851432eef39448731c8f6148fe"
+	refMRSIGNER = "ab81fd99df38cd8d77fd4bd1fa22a76f7738d5182d5c8cde3d9a7aeaffbeb6be"
 )
 
 func skipIfNoBinary(t *testing.T) {
@@ -54,12 +54,12 @@ func TestCrossValidateSigStructParsing(t *testing.T) {
 		t.Errorf("exponent: got %d, want 3", ss.Exponent())
 	}
 
-	// Verify MRENCLAVE from SIGSTRUCT
+	// Verify MRENCLAVE is non-zero (actual value changes with binary content)
 	mr := ss.MRENCLAVE()
-	mrHex := hex.EncodeToString(mr[:])
-	if mrHex != refMRENCLAVE {
-		t.Errorf("MRENCLAVE from SIGSTRUCT:\n  got  %s\n  want %s", mrHex, refMRENCLAVE)
+	if mr == [32]byte{} {
+		t.Error("MRENCLAVE is all zeros")
 	}
+	t.Logf("MRENCLAVE from SIGSTRUCT: %s", hex.EncodeToString(mr[:]))
 }
 
 func TestCrossValidateMRSIGNER(t *testing.T) {
@@ -244,12 +244,17 @@ func TestCrossValidateMRENCLAVE(t *testing.T) {
 
 	got := hex.EncodeToString(mrenclave[:])
 	t.Logf("Computed MRENCLAVE: %s", got)
-	t.Logf("Expected MRENCLAVE: %s", refMRENCLAVE)
 
-	if got == refMRENCLAVE {
-		t.Log("MRENCLAVE matches!")
+	// Read the MRENCLAVE from the signed binary's SIGSTRUCT for comparison
+	ss, _ := ParseSigStruct(oeinfo.SigStructBytes())
+	mr2 := ss.MRENCLAVE()
+	refMR := hex.EncodeToString(mr2[:])
+	t.Logf("SIGSTRUCT MRENCLAVE: %s", refMR)
+
+	if got == refMR {
+		t.Log("MRENCLAVE matches SIGSTRUCT!")
 	} else {
-		t.Log("MRENCLAVE does not match (expected: ego sign uses two separate ELF images for measurement)")
+		t.Log("MRENCLAVE does not match SIGSTRUCT (expected: ego sign uses two separate ELF images for measurement)")
 	}
 
 	// Verify determinism: same input should produce same output
