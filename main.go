@@ -20,8 +20,6 @@ func main() {
 	switch command {
 	case "keygen":
 		err = cmd.RunKeygen(args)
-	case "sign":
-		err = cmd.RunSign(args)
 	case "hash":
 		err = cmd.RunHash(args)
 	case "partial-sign":
@@ -52,7 +50,6 @@ Commands:
                       Initiator: mpcegosign keygen --parties N --threshold T
                       Joiner:    mpcegosign keygen
 
-  sign                Sign EGo enclave with all shares locally
   hash                Compute MRENCLAVE and output digest for distributed signing
   partial-sign        Compute partial signature with one share
   combine             Combine partial signatures into signed enclave

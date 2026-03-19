@@ -48,22 +48,7 @@ Party numbers are auto-assigned: initiator is party 1, joiners are numbered in t
 
 ### 2. Signing an Enclave
 
-There are two signing workflows: **all-at-once** (all shares on one machine) and **distributed** (each party signs independently).
-
-#### All-at-once signing
-
-When t or more parties can provide their shares to a single machine:
-
-```bash
-mpcegosign sign \
-  --config enclave.json \
-  --shares share_1.json,share_2.json \
-  --out signed-binary
-```
-
-#### Distributed signing
-
-When parties are on separate machines and cannot share their key files:
+Each party computes their partial signature independently. No party ever needs access to another party's share.
 
 **Step 1 — Compute the hash** (any party with access to the unsigned binary):
 ```bash
@@ -129,21 +114,6 @@ If `--parties` is omitted, the tool runs as a joiner and waits for an INIT messa
 | 3-of-5 | 6 | 10 |
 | 4-of-5 | 4 | 5 |
 | 5-of-5 | 1 | 1 |
-
-### `sign`
-
-Sign an EGo enclave with all required shares on one machine.
-
-```
-mpcegosign sign --config enclave.json --shares s1.json,s2.json [--out output] [--ego /opt/ego]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--config` | Path to EGo `enclave.json`. Default: `enclave.json`. |
-| `--shares` | Comma-separated paths to key share files. Must provide at least threshold-many shares. |
-| `--out` | Output path for signed binary. Default: overwrites the exe from config. |
-| `--ego` | Path to EGo installation. Default: auto-detect (`EGO_PATH` env, then `/opt/ego`). |
 
 ### `hash`
 

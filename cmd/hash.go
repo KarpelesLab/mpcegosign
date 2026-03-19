@@ -310,6 +310,15 @@ func loadPublicKeyModulus(path string) (*big.Int, error) {
 	return rsaPub.N, nil
 }
 
+func padBigIntTo(b []byte, size int) []byte {
+	if len(b) >= size {
+		return b[:size]
+	}
+	result := make([]byte, size)
+	copy(result[size-len(b):], b)
+	return result
+}
+
 func loadConfig(path string) (*config.EnclaveConfig, error) {
 	return config.LoadConfig(path)
 }
