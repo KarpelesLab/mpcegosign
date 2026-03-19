@@ -1,7 +1,6 @@
 package elfutil
 
 import (
-	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
@@ -23,6 +22,27 @@ const (
 type OEInfo struct {
 	Data       []byte
 	FileOffset uint64
+}
+
+// SegmentInfo holds information about a PT_LOAD segment.
+type SegmentInfo struct {
+	VAddr    uint64
+	MemSize  uint64
+	FileSize uint64
+	Flags    uint32 // ELF p_flags
+	Data     []byte // file-backed data
+}
+
+// ELFInfo holds all information extracted from the ELF needed for measurement.
+type ELFInfo struct {
+	Segments        []SegmentInfo
+	ImageSize       uint64 // total image span (high - low), page-aligned
+	RelocData       []byte // relocation section data
+	RelocSize       uint64 // relocation data size
+	TLSPageCount    uint64 // number of pages for TLS (from PT_TLS)
+	EntryRVA        uint64 // entry point address
+	PayloadData     []byte // EGo payload data (from .oeinfo offset)
+	PayloadDataSize uint64 // EGo payload data size
 }
 
 // ReadOEInfo reads the .oeinfo section from an ELF binary.
@@ -91,115 +111,137 @@ func WriteSigStructToFile(path string, oeinfo *OEInfo, sigstruct []byte) error {
 	return err
 }
 
-// LoadSegment represents a PT_LOAD segment from the ELF.
-type LoadSegment struct {
-	VAddr    uint64
-	MemSize  uint64
-	FileSize uint64
-	Flags    elf.ProgFlag
-	Data     []byte
-}
-
-// ReadLoadSegments reads all PT_LOAD segments from an ELF binary.
-func ReadLoadSegments(path string) ([]LoadSegment, error) {
+// ReadELFInfo reads all information needed for measurement from an ELF binary.
+func ReadELFInfo(path string) (*ELFInfo, error) {
 	f, err := elf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening ELF: %w", err)
 	}
 	defer f.Close()
 
-	var segments []LoadSegment
+	info := &ELFInfo{
+		EntryRVA: f.Entry,
+	}
+
+	// Read PT_LOAD segments and compute image size
+	var low, high uint64
+	first := true
 	for _, prog := range f.Progs {
-		if prog.Type != elf.PT_LOAD {
-			continue
+		switch prog.Type {
+		case elf.PT_LOAD:
+			data := make([]byte, prog.Filesz)
+			if prog.Filesz > 0 {
+				if _, err := prog.ReadAt(data, 0); err != nil && err != io.EOF {
+					return nil, fmt.Errorf("reading segment at vaddr %#x: %w", prog.Vaddr, err)
+				}
+			}
+			info.Segments = append(info.Segments, SegmentInfo{
+				VAddr:    prog.Vaddr,
+				MemSize:  prog.Memsz,
+				FileSize: prog.Filesz,
+				Flags:    uint32(prog.Flags),
+				Data:     data,
+			})
+
+			segEnd := prog.Vaddr + prog.Memsz
+			if first || prog.Vaddr < low {
+				low = prog.Vaddr
+			}
+			if first || segEnd > high {
+				high = segEnd
+			}
+			first = false
+
+		case elf.PT_TLS:
+			// Compute TLS page count
+			tlsSize := prog.Memsz
+			if tlsSize > 0 {
+				info.TLSPageCount = roundUpToPage64(tlsSize) / 4096
+			}
 		}
-		data := make([]byte, prog.Filesz)
-		if _, err := prog.ReadAt(data, 0); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("reading segment at vaddr %#x: %w", prog.Vaddr, err)
-		}
-		segments = append(segments, LoadSegment{
-			VAddr:    prog.Vaddr,
-			MemSize:  prog.Memsz,
-			FileSize: prog.Filesz,
-			Flags:    prog.Flags,
-			Data:     data,
-		})
 	}
-	return segments, nil
-}
 
-// Relocation represents .dynamic relocation info.
-type Relocation struct {
-	RVA  uint64
-	Size uint64
-	Data []byte
-}
+	if !first {
+		info.ImageSize = roundUpToPage64(high - low)
+	}
 
-// ReadRelocations reads relocation data from the ELF binary.
-// It looks at the .dynamic section for DT_REL/DT_RELA entries.
-func ReadRelocations(path string) (*Relocation, error) {
-	f, err := elf.Open(path)
+	// Read relocation data
+	info.RelocData, info.RelocSize, err = readRelocData(f)
 	if err != nil {
-		return nil, fmt.Errorf("opening ELF: %w", err)
+		return nil, err
+	}
+
+	// Read EGo payload data from .oeinfo
+	sec := f.Section(OEInfoSectionName)
+	if sec != nil {
+		oeData, err := sec.Data()
+		if err == nil && len(oeData) >= PayloadSizePos+8 {
+			payloadOffset := binary.LittleEndian.Uint64(oeData[PayloadOffsetPos:])
+			payloadSize := binary.LittleEndian.Uint64(oeData[PayloadSizePos:])
+			if payloadOffset > 0 && payloadSize > 0 {
+				info.PayloadDataSize = payloadSize
+				info.PayloadData, err = readPayloadData(path, payloadOffset, payloadSize)
+				if err != nil {
+					return nil, fmt.Errorf("reading payload data: %w", err)
+				}
+			}
+		}
+	}
+
+	return info, nil
+}
+
+func readPayloadData(path string, offset, size uint64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 
+	data := make([]byte, size)
+	_, err = f.ReadAt(data, int64(offset))
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return data, nil
+}
+
+func readRelocData(f *elf.File) ([]byte, uint64, error) {
+	// Look for .dynamic section to find DT_REL/DT_RELA
 	dynSec := f.Section(".dynamic")
 	if dynSec == nil {
-		return nil, nil // no dynamic section
+		return nil, 0, nil
 	}
 
 	dynData, err := dynSec.Data()
 	if err != nil {
-		return nil, fmt.Errorf("reading .dynamic: %w", err)
+		return nil, 0, fmt.Errorf("reading .dynamic: %w", err)
 	}
 
-	var relAddr, relSize uint64
 	var relaAddr, relaSize uint64
 
-	// Parse dynamic entries (each is 16 bytes on 64-bit: tag + val)
-	r := bytes.NewReader(dynData)
-	for {
-		var tag, val int64
-		if err := binary.Read(r, binary.LittleEndian, &tag); err != nil {
-			break
-		}
-		if err := binary.Read(r, binary.LittleEndian, &val); err != nil {
-			break
-		}
+	for i := 0; i+16 <= len(dynData); i += 16 {
+		tag := int64(binary.LittleEndian.Uint64(dynData[i:]))
+		val := binary.LittleEndian.Uint64(dynData[i+8:])
 		switch elf.DynTag(tag) {
-		case elf.DT_REL:
-			relAddr = uint64(val)
-		case elf.DT_RELSZ:
-			relSize = uint64(val)
 		case elf.DT_RELA:
-			relaAddr = uint64(val)
+			relaAddr = val
 		case elf.DT_RELASZ:
-			relaSize = uint64(val)
+			relaSize = val
 		}
 	}
 
-	// Prefer RELA over REL
-	addr, size := relaAddr, relaSize
-	if addr == 0 {
-		addr, size = relAddr, relSize
-	}
-	if addr == 0 || size == 0 {
-		return nil, nil
+	if relaAddr == 0 || relaSize == 0 {
+		return nil, 0, nil
 	}
 
-	// Read the relocation data from the file using the virtual address
-	// We need to find which segment contains this address
-	data, err := readDataAtVAddr(f, addr, size)
+	// Read the relocation data
+	data, err := readDataAtVAddr(f, relaAddr, relaSize)
 	if err != nil {
-		return nil, fmt.Errorf("reading relocation data: %w", err)
+		return nil, 0, fmt.Errorf("reading relocation data: %w", err)
 	}
 
-	return &Relocation{
-		RVA:  addr,
-		Size: size,
-		Data: data,
-	}, nil
+	return data, relaSize, nil
 }
 
 func readDataAtVAddr(f *elf.File, vaddr, size uint64) ([]byte, error) {
@@ -220,6 +262,10 @@ func readDataAtVAddr(f *elf.File, vaddr, size uint64) ([]byte, error) {
 	return nil, fmt.Errorf("virtual address %#x not found in any PT_LOAD segment", vaddr)
 }
 
+func roundUpToPage64(n uint64) uint64 {
+	return (n + 4095) & ^uint64(4095)
+}
+
 // CopyFile creates a copy of a file.
 func CopyFile(src, dst string) error {
 	in, err := os.ReadFile(src)
@@ -233,7 +279,7 @@ func CopyFile(src, dst string) error {
 type ProgFlag = elf.ProgFlag
 
 const (
-	PF_X ProgFlag = elf.PF_X
-	PF_W ProgFlag = elf.PF_W
-	PF_R ProgFlag = elf.PF_R
+	PF_X uint32 = 0x1
+	PF_W uint32 = 0x2
+	PF_R uint32 = 0x4
 )

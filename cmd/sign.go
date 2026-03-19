@@ -79,20 +79,14 @@ func RunSign(args []string) error {
 		return fmt.Errorf("parsing enclave properties: %w", err)
 	}
 
-	// Read ELF segments
-	segments, err := elfutil.ReadLoadSegments(outPath)
+	// Read ELF info
+	elfInfo, err := elfutil.ReadELFInfo(outPath)
 	if err != nil {
-		return fmt.Errorf("reading ELF segments: %w", err)
-	}
-
-	// Read relocations
-	reloc, err := elfutil.ReadRelocations(outPath)
-	if err != nil {
-		return fmt.Errorf("reading relocations: %w", err)
+		return fmt.Errorf("reading ELF info: %w", err)
 	}
 
 	// Compute MRENCLAVE
-	mrenclave, err := sgx.ComputeMRENCLAVE(segments, reloc, props)
+	mrenclave, err := sgx.ComputeMRENCLAVE(elfInfo, props)
 	if err != nil {
 		return fmt.Errorf("computing MRENCLAVE: %w", err)
 	}
