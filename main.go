@@ -48,10 +48,9 @@ func usage() {
 Usage: mpcegosign <command> [options]
 
 Commands:
-  keygen              Generate key locally and split into shares (ceremony mode)
-  keygen contribute   Generate contribution for distributed keygen
-  keygen finalize     Coordinator: generate key using contributions, output share messages
-  keygen accept       Import share from coordinator's message
+  keygen              Interactive distributed keygen via group chat messages
+                      Initiator: mpcegosign keygen --parties N --threshold T
+                      Joiner:    mpcegosign keygen
 
   sign                Sign EGo enclave with all shares locally
   hash                Compute MRENCLAVE and output digest for distributed signing
