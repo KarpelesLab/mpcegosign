@@ -19,7 +19,7 @@ func RunSign(args []string) error {
 	configPath := fs.String("config", "enclave.json", "path to enclave.json")
 	sharesStr := fs.String("shares", "", "comma-separated share files")
 	output := fs.String("out", "", "output signed binary (default: overwrite exe)")
-	egoPath := fs.String("ego", "", "path to EGo installation (e.g. /opt/ego)")
+	egoPath := fs.String("ego", "", "path to EGo installation (default: auto-detect)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,21 +80,14 @@ func RunSign(args []string) error {
 		return fmt.Errorf("parsing enclave properties: %w", err)
 	}
 
-	var mrenclave [32]byte
-	if *egoPath != "" {
-		mrenclave, err = computeMRENCLAVEWithEgo(*egoPath, outPath, *configPath)
-		if err != nil {
-			return fmt.Errorf("computing MRENCLAVE via ego-oesign: %w", err)
-		}
-	} else {
-		elfInfo, err := elfutil.ReadELFInfo(outPath)
-		if err != nil {
-			return fmt.Errorf("reading ELF info: %w", err)
-		}
-		mrenclave, err = sgx.ComputeMRENCLAVE(elfInfo, props)
-		if err != nil {
-			return fmt.Errorf("computing MRENCLAVE: %w", err)
-		}
+	// Compute MRENCLAVE via ego-oesign
+	resolvedEgoPath, err := findEgoPath(*egoPath)
+	if err != nil {
+		return err
+	}
+	mrenclave, err := computeMRENCLAVEWithEgo(resolvedEgoPath, outPath, *configPath)
+	if err != nil {
+		return fmt.Errorf("computing MRENCLAVE: %w", err)
 	}
 	fmt.Printf("MRENCLAVE: %s\n", hex.EncodeToString(mrenclave[:]))
 

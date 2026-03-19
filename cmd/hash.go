@@ -46,6 +46,12 @@ func RunHash(args []string) error {
 		return fmt.Errorf("--pubkey is required")
 	}
 
+	// Auto-detect EGo path
+	resolvedEgoPath, err := findEgoPath(*egoPath)
+	if err != nil {
+		return err
+	}
+
 	// Load config
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -60,35 +66,10 @@ func RunHash(args []string) error {
 
 	exePath := cfg.Exe
 
-	var mrenclave [32]byte
-
-	if *egoPath != "" {
-		// Use ego-oesign to compute MRENCLAVE (handles dual-image layout)
-		mrenclave, err = computeMRENCLAVEWithEgo(*egoPath, exePath, *configPath)
-		if err != nil {
-			return fmt.Errorf("computing MRENCLAVE via ego-oesign: %w", err)
-		}
-	} else {
-		// Direct computation (works for single-image enclaves)
-		oeinfo, err := elfutil.ReadOEInfo(exePath)
-		if err != nil {
-			return fmt.Errorf("reading .oeinfo: %w", err)
-		}
-
-		props, err := sgx.ParseEnclaveProperties(oeinfo.Data)
-		if err != nil {
-			return fmt.Errorf("parsing enclave properties: %w", err)
-		}
-
-		elfInfo, err := elfutil.ReadELFInfo(exePath)
-		if err != nil {
-			return fmt.Errorf("reading ELF info: %w", err)
-		}
-
-		mrenclave, err = sgx.ComputeMRENCLAVE(elfInfo, props)
-		if err != nil {
-			return fmt.Errorf("computing MRENCLAVE: %w", err)
-		}
+	// Compute MRENCLAVE via ego-oesign
+	mrenclave, err := computeMRENCLAVEWithEgo(resolvedEgoPath, exePath, *configPath)
+	if err != nil {
+		return fmt.Errorf("computing MRENCLAVE: %w", err)
 	}
 
 	fmt.Printf("MRENCLAVE: %s\n", hex.EncodeToString(mrenclave[:]))
@@ -331,4 +312,26 @@ func loadPublicKeyModulus(path string) (*big.Int, error) {
 
 func loadConfig(path string) (*config.EnclaveConfig, error) {
 	return config.LoadConfig(path)
+}
+
+// findEgoPath resolves the EGo installation path.
+// Checks --ego flag, then EGO_PATH env var, then /opt/ego.
+func findEgoPath(explicit string) (string, error) {
+	candidates := []string{explicit}
+	if env := os.Getenv("EGO_PATH"); env != "" {
+		candidates = append(candidates, env)
+	}
+	candidates = append(candidates, "/opt/ego")
+
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		oesign := filepath.Join(p, "bin", "ego-oesign")
+		if _, err := os.Stat(oesign); err == nil {
+			return p, nil
+		}
+	}
+
+	return "", fmt.Errorf("EGo installation not found; use --ego /path/to/ego or set EGO_PATH")
 }
