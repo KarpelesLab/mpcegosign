@@ -48,42 +48,23 @@ Party numbers are auto-assigned: initiator is party 1, joiners are numbered in t
 
 ### 2. Signing an Enclave
 
-Each party computes their partial signature independently. No party ever needs access to another party's share.
+Signing also happens via group chat, same as keygen. One party initiates (needs the binary + EGo), others contribute their partial signatures.
 
-**Step 1 — Compute the hash** (any party with access to the unsigned binary):
+**Initiator** (has the unsigned binary, enclave.json, EGo, and their share):
 ```bash
-mpcegosign hash \
-  --config enclave.json \
-  --pubkey public.pem \
-  --out enclave.hash
+mpcegosign sign --config enclave.json --share share_1.json --out signed-binary
 ```
-Distribute `enclave.hash` to all signing parties.
+This computes the MRENCLAVE, outputs a SIGN-INIT message to the group, then waits for partial signatures.
 
-**Step 2 — Each signing party computes their partial signature**:
+**Each other signing party** (has their share):
 ```bash
-mpcegosign partial-sign \
-  --share share_1.json \
-  --hash enclave.hash \
-  --out partial_1.sig
+mpcegosign sign --share share_3.json
 ```
-For threshold shares, specify which subset of parties is signing:
-```bash
-mpcegosign partial-sign \
-  --share share_1.json \
-  --hash enclave.hash \
-  --subset 1,3 \
-  --out partial_1.sig
-```
-All signing parties must use the same `--subset`.
+Paste the SIGN-INIT message. The tool shows the MRENCLAVE for verification, computes the partial signature, and outputs a SIGN-PARTIAL message to post to the group.
 
-**Step 3 — Combine partial signatures**:
-```bash
-mpcegosign combine \
-  --partials partial_1.sig,partial_3.sig \
-  --hash enclave.hash \
-  --enclave unsigned-binary \
-  --out signed-binary
-```
+**Back to the initiator**: paste each SIGN-PARTIAL. Once the threshold is reached, the tool combines the partials and writes the signed binary.
+
+Each party independently verifies the MRENCLAVE shown in the SIGN-INIT message. If it doesn't match what they expect, they don't sign.
 
 ## Commands
 
@@ -115,50 +96,26 @@ If `--parties` is omitted, the tool runs as a joiner and waits for an INIT messa
 | 4-of-5 | 4 | 5 |
 | 5-of-5 | 1 | 1 |
 
-### `hash`
+### `sign`
 
-Compute MRENCLAVE and produce a digest file for distributed signing.
-
-```
-mpcegosign hash --config enclave.json --pubkey public.pem [--out enclave.hash] [--ego /opt/ego]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--config` | Path to EGo `enclave.json`. |
-| `--pubkey` | Path to the shared RSA public key PEM. |
-| `--out` | Output hash file path. Default: `enclave.hash`. |
-| `--ego` | Path to EGo installation. |
-
-### `partial-sign`
-
-Compute a partial signature using one party's share.
+Interactive distributed signing via group chat messages.
 
 ```
-mpcegosign partial-sign --share share.json --hash enclave.hash [--subset 1,2,4] [--out partial.sig]
+# Initiator (has binary + config + EGo):
+mpcegosign sign --config enclave.json --share share.json [--out signed] [--ego /opt/ego]
+
+# Signer (has their share):
+mpcegosign sign --share share.json
 ```
 
 | Flag | Description |
 |------|-------------|
+| `--config` | Path to EGo `enclave.json`. Presence of this flag makes you the initiator. |
 | `--share` | Path to this party's key share JSON. |
-| `--hash` | Path to hash file from `hash` command. |
-| `--subset` | Which subset of parties is signing. Required for threshold shares unless n-of-n. |
-| `--out` | Output path. Default: `partial.sig`. |
+| `--out` | Output signed binary path (initiator only). Default: `<exe>.signed`. |
+| `--ego` | Path to EGo installation. Default: auto-detect. |
 
-### `combine`
-
-Combine partial signatures into a signed enclave binary.
-
-```
-mpcegosign combine --partials p1.sig,p2.sig --hash enclave.hash --enclave binary [--out signed]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--partials` | Comma-separated partial signature files. |
-| `--hash` | Hash file from `hash` command. |
-| `--enclave` | Path to unsigned enclave binary. |
-| `--out` | Output path. Default: `<enclave>.signed`. |
+The initiator computes the MRENCLAVE and posts a SIGN-INIT message. Each signer verifies the MRENCLAVE, computes their partial, and posts a SIGN-PARTIAL message. Once the initiator has enough partials, the tool combines them and writes the signed binary.
 
 ### `signerid`
 
@@ -173,7 +130,7 @@ mpcegosign signerid --enclave signed-binary
 
 | Variable | Description |
 |----------|-------------|
-| `EGO_PATH` | Path to EGo installation directory (e.g. `/opt/ego`). Used by `sign` and `hash` commands to locate `ego-oesign` for MRENCLAVE computation. Falls back to `/opt/ego` if unset. |
+| `EGO_PATH` | Path to EGo installation directory (e.g. `/opt/ego`). Used by `sign` to locate `ego-oesign` for MRENCLAVE computation. Falls back to `/opt/ego` if unset. |
 
 ## How It Works
 
@@ -200,6 +157,8 @@ EGo uses a dual-image layout (ego-enclave runtime + Go payload binary) for measu
 
 ### Key Share (`share_N.json`)
 
+The only file that persists between sessions. Each party keeps theirs secure.
+
 ```json
 {
   "version": 2,
@@ -215,28 +174,7 @@ EGo uses a dual-image layout (ego-enclave runtime + Go payload binary) for measu
 }
 ```
 
-### Hash File (`enclave.hash`)
-
-```json
-{
-  "version": 1,
-  "mrenclave": "<hex>",
-  "padded_digest": "<base64, 384 bytes>",
-  "sigstruct_unsigned": "<base64, 1808 bytes>",
-  "config_hash": "<hex>"
-}
-```
-
-### Partial Signature (`partial.sig`)
-
-```json
-{
-  "version": 1,
-  "party_index": 1,
-  "subset_key": "1,2",
-  "partial_signature": "<base64 big-endian>"
-}
-```
+All other data (hashes, partial signatures, SIGSTRUCT) is exchanged as base64 messages in the group chat during the interactive signing ceremony — no intermediate files needed.
 
 ## License
 

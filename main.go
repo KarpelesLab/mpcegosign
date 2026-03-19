@@ -20,12 +20,8 @@ func main() {
 	switch command {
 	case "keygen":
 		err = cmd.RunKeygen(args)
-	case "hash":
-		err = cmd.RunHash(args)
-	case "partial-sign":
-		err = cmd.RunPartialSign(args)
-	case "combine":
-		err = cmd.RunCombine(args)
+	case "sign":
+		err = cmd.RunSign(args)
 	case "signerid":
 		err = cmd.RunSignerID(args)
 	default:
@@ -46,16 +42,17 @@ func usage() {
 Usage: mpcegosign <command> [options]
 
 Commands:
-  keygen              Interactive distributed keygen via group chat messages
-                      Initiator: mpcegosign keygen --parties N --threshold T
-                      Joiner:    mpcegosign keygen
+  keygen      Interactive distributed keygen via group chat messages
+              Initiator: mpcegosign keygen --parties N --threshold T
+              Joiner:    mpcegosign keygen
 
-  hash                Compute MRENCLAVE and output digest for distributed signing
-  partial-sign        Compute partial signature with one share
-  combine             Combine partial signatures into signed enclave
-  signerid            Compute MRSIGNER from key or binary
+  sign        Interactive distributed signing via group chat messages
+              Initiator: mpcegosign sign --config enclave.json --share share.json
+              Signer:    mpcegosign sign --share share.json
+
+  signerid    Compute MRSIGNER from key or binary
 
 Environment:
-  EGO_PATH      Path to EGo installation (default: /opt/ego)
+  EGO_PATH    Path to EGo installation (default: /opt/ego)
 `)
 }
